@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
-from database_connector import DatabaseConnector
+from scripts.database_connector import DatabaseConnector
 
 
 def write_env_file(path: Path, lines: list[str]) -> Path:
@@ -53,11 +53,11 @@ class TestDatabaseConnectorUnit(unittest.TestCase):
             query = "SELECT 1 AS id"
 
             with patch.dict(os.environ, {}, clear=True):
-                with patch("database_connector.create_engine", return_value=fake_engine):
+                with patch("scripts.database_connector.create_engine", return_value=fake_engine):
                     connector = DatabaseConnector(env_path=env_path)
 
                 with patch(
-                    "database_connector.pd.read_sql", return_value=expected_df
+                    "scripts.database_connector.pd.read_sql", return_value=expected_df
                 ) as mock_read_sql:
                     result_df = connector.execute_query(query, params={"id": 1})
 
@@ -87,7 +87,7 @@ class TestDatabaseConnectorUnit(unittest.TestCase):
             fake_engine.connect.return_value = fake_context_manager
 
             with patch.dict(os.environ, {}, clear=True):
-                with patch("database_connector.create_engine", return_value=fake_engine):
+                with patch("scripts.database_connector.create_engine", return_value=fake_engine):
                     connector = DatabaseConnector(env_path=env_path)
 
             self.assertTrue(connector.test_connection())
