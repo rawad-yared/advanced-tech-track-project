@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -39,6 +40,15 @@ class DatabaseConnector:
             "DB_NAME": self.database,
         }
 
+    @staticmethod
+    def _normalize_identifier(value: str, label: str) -> str:
+        candidate = value.strip().upper()
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", candidate):
+            raise ValueError(
+                f"Invalid {label} '{value}'. Only letters, digits, and underscores are allowed."
+            )
+        return candidate
+
     def _build_connection_url(self) -> URL:
         try:
             port = int(self.port or "")
@@ -72,6 +82,35 @@ class DatabaseConnector:
         if params is not None:
             kwargs["params"] = dict(params)
         return pd.read_sql(text(query), self.engine, **kwargs)
+
+    def get_table_names(self, schema: str) -> list[str]:
+        schema_name = self._normalize_identifier(schema, "schema")
+        query = """
+            SELECT tabname
+            FROM SYSCAT.TABLES
+            WHERE tabschema = :schema_name
+              AND type IN ('T', 'N', 'V')
+            ORDER BY tabname
+        """
+        df = self.execute_query(query, params={"schema_name": schema_name})
+        if df.empty:
+            return []
+        df.columns = [column.lower() for column in df.columns]
+        return [str(value).upper() for value in df["tabname"].dropna().tolist()]
+
+    def table_exists(self, schema: str, table_name: str) -> bool:
+        schema_name = self._normalize_identifier(schema, "schema")
+        table = self._normalize_identifier(table_name, "table")
+        query = """
+            SELECT 1
+            FROM SYSCAT.TABLES
+            WHERE tabschema = :schema_name
+              AND tabname = :table_name
+              AND type IN ('T', 'N', 'V')
+            FETCH FIRST 1 ROW ONLY
+        """
+        df = self.execute_query(query, params={"schema_name": schema_name, "table_name": table})
+        return not df.empty
 
     def dispose(self) -> None:
         """Release pooled DB connections."""

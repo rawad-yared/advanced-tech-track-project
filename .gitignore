@@ -215,3 +215,8 @@ __marimo__/
 
 #ENV
 .env
+
+# Local demo artifacts (not part of live DB2 deployment)
+*.duckdb
+data/parquet/
+*.ipynb

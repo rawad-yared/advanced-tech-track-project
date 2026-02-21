@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import os
 import re
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import duckdb
 import pandas as pd
-from dotenv import load_dotenv
+from scripts.database_connector import DatabaseConnector
 
 try:
     import polars as pl
@@ -16,7 +14,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when polars isn't in
     pl = None  # type: ignore[assignment]
 
 DEFAULT_SCHEMA = "IEPLANE"
-DEFAULT_DUCKDB_PATH = "IE_AIRPLANES.duckdb"
 
 
 def sanitize_schema(schema: str | None) -> str:
@@ -26,36 +23,13 @@ def sanitize_schema(schema: str | None) -> str:
     return candidate
 
 
-def resolve_duckdb_path(
-    env_path: str = ".env",
-    database_path: str | os.PathLike[str] | None = None,
-) -> Path:
-    if database_path is not None:
-        candidate = Path(database_path)
-    else:
-        load_dotenv(dotenv_path=env_path, override=False)
-        candidate = Path(os.getenv("DUCKDB_PATH", DEFAULT_DUCKDB_PATH))
-
-    resolved = candidate.expanduser()
-    if not resolved.is_absolute():
-        resolved = (Path.cwd() / resolved).resolve()
-    if not resolved.exists():
-        raise FileNotFoundError(
-            f"DuckDB database not found at {resolved}. "
-            "Set DUCKDB_PATH in .env or pass database_path explicitly."
-        )
-    return resolved
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
 
 
-def _to_duckdb_named_params(
-    query: str,
-    params: Mapping[str, Any] | None = None,
-) -> tuple[str, dict[str, Any]]:
-    if not params:
-        return query, {}
-    # Convert SQLAlchemy-style named params (:name) to DuckDB named params ($name).
-    converted_query = re.sub(r":([A-Za-z_][A-Za-z0-9_]*)", r"$\1", query)
-    return converted_query, dict(params)
+def qualify_table(schema: str | None, table_name: str) -> str:
+    schema_name = sanitize_schema(schema)
+    return f"{quote_identifier(schema_name)}.{quote_identifier(table_name)}"
 
 
 def _to_pandas_frame(df: Any) -> pd.DataFrame:
@@ -76,27 +50,16 @@ def _to_polars_frame(df: Any) -> "pl.DataFrame":
     return pl.DataFrame(df)
 
 
-def run_duckdb_query(
+def run_db2_query(
+    connector: DatabaseConnector,
     query: str,
     params: Mapping[str, Any] | None = None,
-    env_path: str = ".env",
-    database_path: str | os.PathLike[str] | None = None,
     as_polars: bool = False,
 ) -> pd.DataFrame | "pl.DataFrame":
-    db_path = resolve_duckdb_path(env_path=env_path, database_path=database_path)
-    converted_query, converted_params = _to_duckdb_named_params(query=query, params=params)
-    connection = duckdb.connect(str(db_path), read_only=True)
-    try:
-        result_df: pd.DataFrame
-        if converted_params:
-            result_df = connection.execute(converted_query, converted_params).fetchdf()
-        else:
-            result_df = connection.execute(converted_query).fetchdf()
-        if as_polars and pl is not None:
-            return pl.from_pandas(result_df)
-        return result_df
-    finally:
-        connection.close()
+    result_df = connector.execute_query(query, params=params)
+    if as_polars and pl is not None:
+        return pl.from_pandas(result_df)
+    return result_df
 
 
 def build_ticket_filters(
@@ -143,44 +106,42 @@ def build_ticket_filters(
 
 
 def get_financial_filter_options(
-    env_path: str = ".env",
+    connector: DatabaseConnector,
     schema: str | None = None,
-    database_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    sanitize_schema(schema)
-    bounds_query = """
+    tickets_table = qualify_table(schema, "TICKETS")
+    routes_table = qualify_table(schema, "ROUTES")
+
+    bounds_query = f"""
         SELECT
             MIN(CAST(departure AS DATE)) AS min_date,
             MAX(CAST(departure AS DATE)) AS max_date
-        FROM TICKETS
+        FROM {tickets_table}
     """
-    class_query = """
+    class_query = f"""
         SELECT DISTINCT class AS ticket_class
-        FROM TICKETS
+        FROM {tickets_table}
         ORDER BY ticket_class
     """
-    route_query = """
+    route_query = f"""
         SELECT DISTINCT route_code
-        FROM ROUTES
+        FROM {routes_table}
         ORDER BY route_code
     """
 
-    bounds_df = run_duckdb_query(
-        bounds_query,
-        env_path=env_path,
-        database_path=database_path,
+    bounds_df = run_db2_query(
+        connector=connector,
+        query=bounds_query,
         as_polars=pl is not None,
     )
-    classes_df = run_duckdb_query(
-        class_query,
-        env_path=env_path,
-        database_path=database_path,
+    classes_df = run_db2_query(
+        connector=connector,
+        query=class_query,
         as_polars=pl is not None,
     )
-    routes_df = run_duckdb_query(
-        route_query,
-        env_path=env_path,
-        database_path=database_path,
+    routes_df = run_db2_query(
+        connector=connector,
+        query=route_query,
         as_polars=pl is not None,
     )
 
@@ -206,15 +167,18 @@ def get_financial_filter_options(
 
 
 def extract_financial_base_data(
+    connector: DatabaseConnector,
     start_date: date,
     end_date: date,
     classes: Iterable[str] | None = None,
     route_codes: Iterable[str] | None = None,
-    env_path: str = ".env",
     schema: str | None = None,
-    database_path: str | os.PathLike[str] | None = None,
 ) -> pd.DataFrame:
-    sanitize_schema(schema)
+    tickets_table = qualify_table(schema, "TICKETS")
+    flights_table = qualify_table(schema, "FLIGHTS")
+    routes_table = qualify_table(schema, "ROUTES")
+    airplanes_table = qualify_table(schema, "AIRPLANES")
+
     where_clause, params = build_ticket_filters(
         alias="t",
         start_date=start_date,
@@ -235,7 +199,7 @@ def extract_financial_base_data(
                 SUM(COALESCE(t.airport_tax, 0)) AS airport_tax_revenue,
                 SUM(COALESCE(t.local_tax, 0)) AS local_tax_revenue,
                 SUM(COALESCE(t.total_amount, 0)) AS total_revenue
-            FROM TICKETS t
+            FROM {tickets_table} t
             {where_clause}
             GROUP BY
                 t.flight_id,
@@ -258,10 +222,10 @@ def extract_financial_base_data(
                     + COALESCE(a.seats_premium, 0)
                     + COALESCE(a.seats_economy, 0)
                 ) AS total_seats
-            FROM FLIGHTS f
-            INNER JOIN ROUTES r
+            FROM {flights_table} f
+            INNER JOIN {routes_table} r
                 ON f.route_code = r.route_code
-            INNER JOIN AIRPLANES a
+            INNER JOIN {airplanes_table} a
                 ON f.airplane = a.aircraft_registration
             GROUP BY
                 f.flight_id,
@@ -271,7 +235,7 @@ def extract_financial_base_data(
             tr.flight_id,
             tr.route_code,
             tr.departure,
-            DATE(tr.departure) AS flight_date,
+            CAST(tr.departure AS DATE) AS flight_date,
             fd.airplane,
             fd.origin,
             fd.destination,
@@ -290,11 +254,10 @@ def extract_financial_base_data(
             ON tr.flight_id = fd.flight_id
             AND tr.route_code = fd.route_code
     """
-    df = run_duckdb_query(
-        query,
+    df = run_db2_query(
+        connector=connector,
+        query=query,
         params=params,
-        env_path=env_path,
-        database_path=database_path,
         as_polars=pl is not None,
     )
 

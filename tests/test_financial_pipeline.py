@@ -8,10 +8,19 @@ import pandas as pd
 from dashboard.financial_pipeline import (
     build_ticket_filters,
     compute_financial_views,
+    qualify_table,
+    sanitize_schema,
 )
 
 
 class TestFinancialPipeline(unittest.TestCase):
+    def test_qualify_table_quotes_schema_and_table(self) -> None:
+        self.assertEqual(qualify_table("ieplane", "TICKETS"), '"IEPLANE"."TICKETS"')
+
+    def test_sanitize_schema_rejects_invalid_identifier(self) -> None:
+        with self.assertRaises(ValueError):
+            sanitize_schema("IE-PLANE")
+
     def test_build_ticket_filters_with_all_options(self) -> None:
         where_clause, params = build_ticket_filters(
             alias="t",

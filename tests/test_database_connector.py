@@ -96,6 +96,54 @@ class TestDatabaseConnectorUnit(unittest.TestCase):
                 "SELECT 1 FROM SYSIBM.SYSDUMMY1",
             )
 
+    def test_get_table_names_normalizes_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = write_env_file(
+                Path(tmp_dir),
+                [
+                    "DB_USERNAME=test_user",
+                    "DB_PASSWORD=test_password",
+                    "DB_HOST=localhost",
+                    "DB_PORT=25010",
+                    "DB_NAME=test_db",
+                ],
+            )
+            fake_engine = MagicMock(name="engine")
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("scripts.database_connector.create_engine", return_value=fake_engine):
+                    connector = DatabaseConnector(env_path=env_path)
+
+            with patch.object(
+                connector,
+                "execute_query",
+                return_value=pd.DataFrame({"TABNAME": ["flights", "tickets"]}),
+            ):
+                tables = connector.get_table_names("ieplane")
+
+            self.assertEqual(tables, ["FLIGHTS", "TICKETS"])
+
+    def test_table_exists_uses_metadata_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = write_env_file(
+                Path(tmp_dir),
+                [
+                    "DB_USERNAME=test_user",
+                    "DB_PASSWORD=test_password",
+                    "DB_HOST=localhost",
+                    "DB_PORT=25010",
+                    "DB_NAME=test_db",
+                ],
+            )
+            fake_engine = MagicMock(name="engine")
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("scripts.database_connector.create_engine", return_value=fake_engine):
+                    connector = DatabaseConnector(env_path=env_path)
+
+            with patch.object(connector, "execute_query", return_value=pd.DataFrame({"X": [1]})):
+                self.assertTrue(connector.table_exists("ieplane", "tickets"))
+            with patch.object(connector, "execute_query", return_value=pd.DataFrame()):
+                self.assertFalse(connector.table_exists("ieplane", "tickets"))
+
 
 class TestDatabaseConnectorIntegration(unittest.TestCase):
     def test_connection_and_data_fetch(self) -> None:

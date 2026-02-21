@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any, Iterable
 
 import duckdb
 import pandas as pd
+from scripts.database_connector import DatabaseConnector
 
 try:
     import polars as pl
@@ -13,8 +13,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when polars isn't in
     pl = None  # type: ignore[assignment]
 
 from dashboard.financial_pipeline import (
-    sanitize_schema,
-    run_duckdb_query,
+    qualify_table,
+    run_db2_query,
 )
 
 
@@ -67,32 +67,31 @@ def _to_polars_frame(df: Any) -> "pl.DataFrame":
 
 
 def get_fleet_filter_options(
-    env_path: str = ".env",
+    connector: DatabaseConnector,
     schema: str | None = None,
-    database_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    sanitize_schema(schema)
-    bounds_query = """
+    flights_table = qualify_table(schema, "FLIGHTS")
+    airplanes_table = qualify_table(schema, "AIRPLANES")
+
+    bounds_query = f"""
         SELECT
             MIN(CAST(departure AS DATE)) AS min_date,
             MAX(CAST(departure AS DATE)) AS max_date
-        FROM FLIGHTS
+        FROM {flights_table}
     """
-    model_query = """
+    model_query = f"""
         SELECT DISTINCT model
-        FROM AIRPLANES
+        FROM {airplanes_table}
         ORDER BY model
     """
-    bounds_df = run_duckdb_query(
-        bounds_query,
-        env_path=env_path,
-        database_path=database_path,
+    bounds_df = run_db2_query(
+        connector=connector,
+        query=bounds_query,
         as_polars=pl is not None,
     )
-    model_df = run_duckdb_query(
-        model_query,
-        env_path=env_path,
-        database_path=database_path,
+    model_df = run_db2_query(
+        connector=connector,
+        query=model_query,
         as_polars=pl is not None,
     )
 
@@ -110,14 +109,16 @@ def get_fleet_filter_options(
 
 
 def extract_fleet_base_data(
+    connector: DatabaseConnector,
     start_date: date,
     end_date: date,
     models: Iterable[str] | None = None,
-    env_path: str = ".env",
     schema: str | None = None,
-    database_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    sanitize_schema(schema)
+    flights_table = qualify_table(schema, "FLIGHTS")
+    airplanes_table = qualify_table(schema, "AIRPLANES")
+    routes_table = qualify_table(schema, "ROUTES")
+
     where_clause, params = build_fleet_filters(
         start_date=start_date, end_date=end_date, models=models
     )
@@ -139,18 +140,17 @@ def extract_fleet_base_data(
             COALESCE(a.total_flight_distance, 0) AS total_flight_distance,
             COALESCE(r.distance, 0) AS route_distance,
             COALESCE(r.flight_minutes, 0) AS route_flight_minutes
-        FROM FLIGHTS f
-        INNER JOIN AIRPLANES a
+        FROM {flights_table} f
+        INNER JOIN {airplanes_table} a
             ON f.airplane = a.aircraft_registration
-        LEFT JOIN ROUTES r
+        LEFT JOIN {routes_table} r
             ON f.route_code = r.route_code
         {where_clause}
     """
-    df = run_duckdb_query(
-        query,
+    df = run_db2_query(
+        connector=connector,
+        query=query,
         params=params,
-        env_path=env_path,
-        database_path=database_path,
         as_polars=pl is not None,
     )
     return _to_pandas_frame(normalize_fleet_base_data(df))
@@ -320,7 +320,7 @@ def _compute_fleet_views_pandas(
                 flight_id,
                 route_code,
                 departure,
-                DATE(departure) AS flight_date,
+                CAST(departure AS DATE) AS flight_date,
                 aircraft_registration,
                 model,
                 MAX(crew_members) AS crew_members,
