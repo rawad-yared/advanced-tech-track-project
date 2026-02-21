@@ -1,252 +1,191 @@
-# advanced-track.ie
+# IE Airlines Executive Command Center (Live DB2)
 
-IE's MBDS program for advanced track
+Live, DB2-connected Streamlit dashboard for executive monitoring of airline performance across:
+- Financial Performance
+- Fleet Operations & Efficiency
+- Commercial & Route Network
+- Human Resources
+- Executive Overview (cross-pillar)
 
-## Getting Started: Fork & Clone
+This version is intentionally **live-connection-first** and uses credentials from `.env`.
 
-Each group must work on their own copy of this repository. Follow these steps to set up your group's repo.
+## 1. What This Repository Delivers
 
-### 1. Fork the Repository
+- A reusable `DatabaseConnector` class (SQLAlchemy + DB2 + `.env`)
+- A Streamlit app that uses one cached connection resource for runtime
+- KPI pipelines for all dashboard pillars
+- Caching for fast interaction (`st.cache_resource` + `st.cache_data`)
+- Graceful fallback when optional `COUNTRIES` table is not present
+- Unit tests for connector and KPI computation logic
 
-1. Go to the original repository on GitHub.
-2. Click the **Fork** button (top-right corner).
-3. Select one group member's GitHub account as the destination. This creates a copy of the repo under that account.
+## 2. Repository Structure
 
-### 2. Clone Your Fork
-
-Once forked, every group member should clone the fork to their local machine.
-
-**macOS (Terminal):**
-```bash
-git clone https://github.com/<your-github-username>/advanced-track.ie.git
-cd advanced-track.ie
+```text
+advanced-tech-track-project/
+├── dashboard/
+│   ├── financial_pipeline.py
+│   ├── fleet_pipeline.py
+│   ├── commercial_pipeline.py
+│   ├── hr_pipeline.py
+│   └── __init__.py
+├── scripts/
+│   ├── database_connector.py
+│   └── __init__.py
+├── tests/
+│   ├── test_database_connector.py
+│   ├── test_financial_pipeline.py
+│   ├── test_fleet_pipeline.py
+│   ├── test_commercial_pipeline.py
+│   └── test_hr_pipeline.py
+├── streamlit_app.py
+├── PROJECT_PROPOSAL.md
+├── pyproject.toml
+├── uv.lock
+├── LICENSE
+└── README.md
 ```
 
-**Windows (PowerShell or Git Bash):**
-```powershell
-git clone https://github.com/<your-github-username>/advanced-track.ie.git
-cd advanced-track.ie
+## 3. Architecture Map
+
+```mermaid
+flowchart TD
+    U["User (Browser)"] --> S["Streamlit App (streamlit_app.py)"]
+    S --> CR["st.cache_resource\nget_live_connector()"]
+    CR --> C["DatabaseConnector\n(scripts/database_connector.py)"]
+    C --> DB[("IBM DB2")]
+
+    S --> CD["st.cache_data\n(filter options + datasets)"]
+    CD --> P1["financial_pipeline.py"]
+    CD --> P2["fleet_pipeline.py"]
+    CD --> P3["commercial_pipeline.py"]
+    CD --> P4["hr_pipeline.py"]
+
+    P1 --> V["Plotly Visuals + KPI Cards"]
+    P2 --> V
+    P3 --> V
+    P4 --> V
 ```
 
-> Replace `<your-github-username>` with the GitHub username of the group member who forked the repo.
+## 4. Runtime Data Flow and Caching
 
-### 3. Add Group Members as Collaborators
+1. Streamlit initializes one live connector via `@st.cache_resource`.
+2. All page filter/data loaders use `@st.cache_data` keyed by schema + filters.
+3. Pipelines query DB2 through the shared connector.
+4. Computations are performed in memory (pandas/polars) and rendered with Plotly.
+5. `Refresh Data Cache` clears both data cache and connection resource cache.
 
-The group member who owns the fork should add the rest of the group:
+### Performance note
 
-1. Go to your forked repo on GitHub.
-2. Navigate to **Settings > Collaborators**.
-3. Click **Add people** and invite each group member by their GitHub username or email.
+- The first page load can take longer because queries run live against DB2 and multiple KPI datasets are fetched.
+- Subsequent interactions are faster due to Streamlit caching (`st.cache_resource` + `st.cache_data`).
+- If your network to DB2 is slow/high-latency, first-load times will increase accordingly.
 
-Once added, all members can push and pull from the same fork.
+## 5. Database Requirements
 
----
+### Core tables (required)
 
-## Database Connection Guide
+- Financial: `TICKETS`, `FLIGHTS`, `ROUTES`, `AIRPLANES`
+- Fleet: `FLIGHTS`, `AIRPLANES`, `ROUTES`
+- Commercial: `TICKETS`, `PASSENGERS`, `FLIGHTS`, `ROUTES`, `AIRPLANES`, `AIRPORTS`
+- HR: `EMPLOYEE`, `DEPARTMENT`, `AIRPLANES`
 
-This guide explains how to set up your Python environment and connect to the IBM DB2 database used in this project.
+### Optional table
 
-## 1. Required Libraries
+- `COUNTRIES` (Commercial enrichment only)
 
-The project relies on a specific set of Python libraries defined in `pyproject.toml`.
+If `COUNTRIES` is missing:
+- Passenger country falls back to `PASSENGERS.country`
+- Passenger continent defaults to `'Unknown'`
+- App shows a warning banner; page remains usable
 
-### Core Data & Analysis
+## 6. Setup on Any Machine
 
-* **`pandas`**: For data manipulation and analysis. Used to load query results into DataFrames.
-* **`numpy`**: Fundamental package for scientific computing.
-* **`scikit-learn`**: Machine learning library.
-* **`plotly`**: For interactive graphing and visualization.
+### Prerequisites
 
-### Database Connectivity
+- Python 3.11+
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 
-* **`sqlalchemy`**: The Python SQL Toolkit and Object Relational Mapper. It provides the core interface for connecting to the database.
-* **`ibm-db-sa`**: The SQLAlchemy adapter for IBM DB2. This allows SQLAlchemy to communicate specifically with DB2 databases.
-  * *Note: This automatically installs the low-level `ibm_db` driver.*
-* **`pyodbc`**: A standard ODBC driver (included for compatibility/alternative connection methods).
-* **`duckdb`**: An in-process SQL OLAP database management system. Used here to perform fast analytical queries on local Pandas DataFrames.
-
-### Utilities
-
-* **`python-dotenv`**: For managing environment variables (e.g., keeping credentials secure).
-* **`azure-identity`**: For Azure authentication support.
-
-## 2. Environment Setup
-
-This project uses `uv` for dependency management.
-
-### Step 1: Install uv
-
-If you don't have `uv` installed, follow the instructions in the [official documentation](https://docs.astral.sh/uv/getting-started/installation/).
-
-**macOS / Linux (Terminal):**
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-**Windows (PowerShell):**
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-### Step 2: Install Dependencies
-
-Run the following command in your terminal to create the virtual environment and install all required packages:
+### Install dependencies
 
 ```bash
 uv sync
 ```
 
-### Step 3: Activate the Virtual Environment
+### Create `.env` in project root
 
-**macOS / Linux (Terminal):**
-```bash
-source .venv/bin/activate
-```
-
-**Windows (PowerShell):**
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-**Windows (Command Prompt):**
-```cmd
-.venv\Scripts\activate.bat
-```
-
-### Step 4: Create Your `.env` File
-
-Create a file called `.env` in the project root to store your database credentials securely. This file is already in `.gitignore` so it will not be pushed to GitHub.
-
-**macOS / Linux (Terminal):**
-```bash
-touch .env
-```
-
-**Windows (PowerShell):**
-```powershell
-New-Item .env
-```
-
-Then open `.env` in any text editor and add:
-
-```
+```env
 DB_USERNAME=your_username
 DB_PASSWORD=your_password
 DB_HOST=52.211.123.34
 DB_PORT=25010
 DB_NAME=IEMASTER
-```
-
-## 3. Connecting to the Database
-
-We use **SQLAlchemy** to establish the connection. The connection string follows the standard URL format for the `ibm_db_sa` dialect.
-
-### Connection String Format
-
-```
-db2+ibm_db://<username>:<password>@<host>:<port>/<database>
-```
-
-### Python Code Example
-
-Here is how to connect and run a query, based on `test_connection.ipynb`.
-
-#### Step 1: Create the Engine
-
-```python
-from sqlalchemy import create_engine
-
-# Replace with your actual credentials
-connection_string = "db2+ibm_db://<username>:<password>@52.211.123.34:25010/IEMASTER"
-
-engine = create_engine(connection_string)
-```
-
-#### Step 2: Querying with Pandas
-
-The most efficient way to retrieve data for analysis is using `pandas.read_sql`.
-
-```python
-import pandas as pd
-
-query = "SELECT * FROM IEPLANE.FLIGHTS FETCH FIRST 10 ROWS ONLY"
-df = pd.read_sql(query, engine)
-
-print(df.head())
-```
-
-## ATT Project Instructions
-
-Now you have access to the data through pandas, you should follow these steps.
-
-1. Create a python class to connect to the database and fetch data.
-
-    * In order to connect, create an `env` file to store your credentials securely and use `python-dotenv` to load them into your connector class.
-    * This class should have methods to execute queries and return data as pandas DataFrames.
-    * Include tests to verify the connection and data retrieval.
-
-2. With the connection ready, use streamlit to build an interactive dashboard.
-
-    * The dashboard should cover the key pillars and KPIs outlined in the project proposal (PROJECT_PROPOSAL.md).
-    * Use plotly for visualizations.
-    * Implement filters and interactive elements to explore the data.
-
-3. Deliver your project by:
-
-    * Forking this repository (see [Getting Started](#getting-started-fork--clone) above).
-    * Committing your code and pushing it to your fork.
-    * Sharing the link to your forked repository with all necessary instructions to run your project.
-
-## 4. Run the Executive Command Center
-
-This repository now includes a Streamlit app entry point at `streamlit_app.py`.
-
-### Current scope (Phases 1-2)
-
-The current implementation delivers:
-
-**Financial Performance**
-
-* Total Revenue (`TICKETS.total_amount`)
-* RASM (`Total Revenue / Available Seat Miles`)
-* Route profitability with "Cash Cow" vs "Money Pit" classification
-* Ancillary revenue analysis (`airport_tax` and `local_tax` versus base `price`)
-* Estimated operating cost including:
-  * Fuel cost (`AIRPLANES.fuel_gallons_hour` * flight duration * fuel price)
-  * Staff cost from federated `STAFF` + `FLIGHT_CREW` tables (pilot/attendant average salary model)
-
-**Fleet Operations & Efficiency**
-
-* Fleet utilization by aircraft and model
-* Maintenance health alerts (A-check, B-check, takeoffs, flight-hours thresholds)
-* Fuel efficiency leaderboard by model
-
-### Run locally
-
-```bash
-uv sync
-uv run streamlit run streamlit_app.py
-```
-
-Optional environment variable (defaults to `IEPLANE`):
-
-```bash
 DB_SCHEMA=IEPLANE
 ```
 
-## 5. Troubleshooting
+Notes:
+- `DB_SCHEMA` is optional in `.env` (default `IEPLANE`), but recommended.
+- `.env` is ignored by git.
 
-* **`NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:db2.ibm_db`**:
-    This means the `ibm-db-sa` library is missing. Ensure it is in your `pyproject.toml` and you have run `uv sync`.
+### Run Streamlit
 
-* **Connection Timeouts**:
-    Ensure you are connected to the internet and that the firewall allows traffic to port `25010`.
+```bash
+uv run streamlit run streamlit_app.py
+```
 
-* **`uv` not recognized (Windows)**:
-    Close and reopen your terminal after installing `uv` so the PATH updates take effect.
+## 7. Running Tests
 
-* **PowerShell script execution disabled (Windows)**:
-    If you get an error activating the virtual environment, run this first:
-    ```powershell
-    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-    ```
+```bash
+uv run python -m unittest \
+  tests.test_database_connector \
+  tests.test_financial_pipeline \
+  tests.test_fleet_pipeline \
+  tests.test_commercial_pipeline \
+  tests.test_hr_pipeline -v
+```
+
+Optional live integration test:
+
+```bash
+RUN_DB_INTEGRATION_TESTS=1 uv run python -m unittest tests.test_database_connector -v
+```
+
+## 8. Streamlit Cloud Deployment
+
+### App entry point
+
+- `streamlit_app.py`
+
+### Secrets mapping
+
+In Streamlit Cloud, add these in **App Settings -> Secrets**:
+
+```toml
+DB_USERNAME="your_username"
+DB_PASSWORD="your_password"
+DB_HOST="52.211.123.34"
+DB_PORT="25010"
+DB_NAME="IEMASTER"
+DB_SCHEMA="IEPLANE"
+```
+
+The connector loads environment variables, so secrets are consumed the same way as local `.env`.
+
+## 9. Troubleshooting
+
+- `Missing required database environment variables`:
+  - Confirm all required keys exist in `.env` or Streamlit secrets.
+- `NoSuchModuleError: sqlalchemy.dialects:db2.ibm_db`:
+  - Run `uv sync` to install `ibm-db-sa`.
+- `Page unavailable ... missing core tables`:
+  - Set `DB_SCHEMA` to a schema that contains required tables.
+- Commercial warning about `COUNTRIES` missing:
+  - Expected fallback behavior; install/add `COUNTRIES` for full geo enrichment.
+- Dashboard is slow on first load:
+  - Expected with live DB2 mode. Wait for initial cache warm-up, then navigation/filtering should be noticeably faster.
+  - Use **Refresh Data Cache** only when needed, since it forces data reload from DB2.
+
+## 10. Security and Collaboration Notes
+
+- Never commit `.env`.
+- Keep credentials personal per teammate.
+- Use feature branches and PRs for all changes.

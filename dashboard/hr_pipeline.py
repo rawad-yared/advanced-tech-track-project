@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+from scripts.database_connector import DatabaseConnector
 
 try:
     import polars as pl
 except ModuleNotFoundError:  # pragma: no cover - exercised when polars isn't installed
     pl = None  # type: ignore[assignment]
 
-from dashboard.financial_pipeline import run_duckdb_query, sanitize_schema
+from dashboard.financial_pipeline import qualify_table, run_db2_query
 
 
 def _to_pandas_frame(df: Any) -> pd.DataFrame:
@@ -84,64 +84,61 @@ def build_hr_filters(
 
 
 def get_hr_filter_options(
-    env_path: str = ".env",
+    connector: DatabaseConnector,
     schema: str | None = None,
-    database_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    sanitize_schema(schema)
-    bounds_query = """
+    employee_table = qualify_table(schema, "EMPLOYEE")
+    department_table = qualify_table(schema, "DEPARTMENT")
+
+    bounds_query = f"""
         SELECT
             MIN(CAST(hiredate AS DATE)) AS min_date,
             MAX(CAST(hiredate AS DATE)) AS max_date
-        FROM EMPLOYEE
+        FROM {employee_table}
     """
-    dept_query = """
+    dept_query = f"""
         SELECT deptno, deptname
-        FROM DEPARTMENT
+        FROM {department_table}
         ORDER BY deptno
     """
-    job_query = """
+    job_query = f"""
         SELECT DISTINCT job
-        FROM EMPLOYEE
+        FROM {employee_table}
         WHERE job IS NOT NULL
         ORDER BY job
     """
-    gender_query = """
+    gender_query = f"""
         SELECT DISTINCT gender
-        FROM EMPLOYEE
+        FROM {employee_table}
         WHERE gender IS NOT NULL
         ORDER BY gender
     """
 
     bounds_df = _to_pandas_frame(
-        run_duckdb_query(
-            bounds_query,
-            env_path=env_path,
-            database_path=database_path,
+        run_db2_query(
+            connector=connector,
+            query=bounds_query,
             as_polars=pl is not None,
         )
     )
     dept_df = _to_pandas_frame(
-        run_duckdb_query(
-            dept_query,
-            env_path=env_path,
-            database_path=database_path,
+        run_db2_query(
+            connector=connector,
+            query=dept_query,
             as_polars=pl is not None,
         )
     )
     job_df = _to_pandas_frame(
-        run_duckdb_query(
-            job_query,
-            env_path=env_path,
-            database_path=database_path,
+        run_db2_query(
+            connector=connector,
+            query=job_query,
             as_polars=pl is not None,
         )
     )
     gender_df = _to_pandas_frame(
-        run_duckdb_query(
-            gender_query,
-            env_path=env_path,
-            database_path=database_path,
+        run_db2_query(
+            connector=connector,
+            query=gender_query,
             as_polars=pl is not None,
         )
     )
@@ -161,16 +158,18 @@ def get_hr_filter_options(
 
 
 def extract_hr_base_data(
+    connector: DatabaseConnector,
     start_date: date,
     end_date: date,
     departments: Iterable[str] | None = None,
     jobs: Iterable[str] | None = None,
     genders: Iterable[str] | None = None,
-    env_path: str = ".env",
     schema: str | None = None,
-    database_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    sanitize_schema(schema)
+    employee_table = qualify_table(schema, "EMPLOYEE")
+    department_table = qualify_table(schema, "DEPARTMENT")
+    airplanes_table = qualify_table(schema, "AIRPLANES")
+
     where_clause, params = build_hr_filters(
         alias="e",
         start_date=start_date,
@@ -198,20 +197,19 @@ def extract_hr_base_data(
             e.is_external,
             e.is_parttime,
             fc.fleet_crew_capacity
-        FROM EMPLOYEE e
-        LEFT JOIN DEPARTMENT d
+        FROM {employee_table} e
+        LEFT JOIN {department_table} d
             ON e.workdept = d.deptno
         CROSS JOIN (
             SELECT SUM(COALESCE(crew_members, 0)) AS fleet_crew_capacity
-            FROM AIRPLANES
+            FROM {airplanes_table}
         ) fc
         {where_clause}
     """
-    df = run_duckdb_query(
-        query,
+    df = run_db2_query(
+        connector=connector,
+        query=query,
         params=params,
-        env_path=env_path,
-        database_path=database_path,
         as_polars=pl is not None,
     )
     return _to_pandas_frame(normalize_hr_base_data(df))

@@ -38,6 +38,19 @@ class TestCommercialPipeline(unittest.TestCase):
         self.assertEqual(params["country_0"], "United States")
         self.assertEqual(params["continent_0"], "North America")
 
+    def test_build_commercial_filters_without_countries_join(self) -> None:
+        where_clause, params = build_commercial_filters(
+            alias="t",
+            countries=["Lebanon"],
+            continents=["Unknown"],
+            country_expression="p.country",
+            continent_expression="'Unknown'",
+        )
+        self.assertIn("p.country IN (:country_0)", where_clause)
+        self.assertIn("'Unknown' IN (:continent_0)", where_clause)
+        self.assertEqual(params["country_0"], "Lebanon")
+        self.assertEqual(params["continent_0"], "Unknown")
+
     def test_compute_commercial_views(self) -> None:
         base_df = pd.DataFrame(
             [

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+from scripts.database_connector import DatabaseConnector
 
 try:
     import polars as pl
 except ModuleNotFoundError:  # pragma: no cover - exercised when polars isn't installed
     pl = None  # type: ignore[assignment]
 
-from dashboard.financial_pipeline import run_duckdb_query, sanitize_schema
+from dashboard.financial_pipeline import qualify_table, run_db2_query
 
 
 def _to_pandas_frame(df: Any) -> pd.DataFrame:
@@ -41,6 +41,8 @@ def build_commercial_filters(
     genders: Iterable[str] | None = None,
     countries: Iterable[str] | None = None,
     continents: Iterable[str] | None = None,
+    country_expression: str = "COALESCE(c.name, p.country)",
+    continent_expression: str = "COALESCE(c.continent, 'Unknown')",
 ) -> tuple[str, dict[str, Any]]:
     clauses: list[str] = []
     params: dict[str, Any] = {}
@@ -87,7 +89,7 @@ def build_commercial_filters(
             key = f"country_{index}"
             params[key] = country
             placeholders.append(f":{key}")
-        clauses.append(f"COALESCE(c.name, p.country) IN ({', '.join(placeholders)})")
+        clauses.append(f"{country_expression} IN ({', '.join(placeholders)})")
 
     continent_values = [item for item in (continents or []) if item]
     if continent_values:
@@ -96,7 +98,7 @@ def build_commercial_filters(
             key = f"continent_{index}"
             params[key] = continent
             placeholders.append(f":{key}")
-        clauses.append(f"COALESCE(c.continent, 'Unknown') IN ({', '.join(placeholders)})")
+        clauses.append(f"{continent_expression} IN ({', '.join(placeholders)})")
 
     if not clauses:
         return "", params
@@ -104,97 +106,84 @@ def build_commercial_filters(
 
 
 def get_commercial_filter_options(
-    env_path: str = ".env",
+    connector: DatabaseConnector,
     schema: str | None = None,
-    database_path: str | Path | None = None,
+    countries_available: bool = True,
 ) -> dict[str, Any]:
-    sanitize_schema(schema)
-    bounds_query = """
+    tickets_table = qualify_table(schema, "TICKETS")
+    routes_table = qualify_table(schema, "ROUTES")
+    passengers_table = qualify_table(schema, "PASSENGERS")
+    countries_table = qualify_table(schema, "COUNTRIES")
+
+    bounds_query = f"""
         SELECT
             MIN(CAST(departure AS DATE)) AS min_date,
             MAX(CAST(departure AS DATE)) AS max_date
-        FROM TICKETS
+        FROM {tickets_table}
     """
-    route_query = """
+    route_query = f"""
         SELECT DISTINCT route_code
-        FROM ROUTES
+        FROM {routes_table}
         ORDER BY route_code
     """
-    class_query = """
+    class_query = f"""
         SELECT DISTINCT class AS ticket_class
-        FROM TICKETS
+        FROM {tickets_table}
         ORDER BY ticket_class
     """
-    gender_query = """
+    gender_query = f"""
         SELECT DISTINCT gender
-        FROM PASSENGERS
+        FROM {passengers_table}
         WHERE gender IS NOT NULL
         ORDER BY gender
     """
-    country_query = """
-        SELECT DISTINCT COALESCE(c.name, p.country) AS passenger_country
-        FROM PASSENGERS p
-        LEFT JOIN COUNTRIES c
-            ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))
-        WHERE COALESCE(c.name, p.country) IS NOT NULL
-        ORDER BY passenger_country
-    """
-    continent_query = """
-        SELECT DISTINCT COALESCE(c.continent, 'Unknown') AS passenger_continent
-        FROM PASSENGERS p
-        LEFT JOIN COUNTRIES c
-            ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))
-        WHERE COALESCE(c.continent, 'Unknown') IS NOT NULL
-        ORDER BY passenger_continent
-    """
+    if countries_available:
+        country_query = f"""
+            SELECT DISTINCT COALESCE(c.name, p.country) AS passenger_country
+            FROM {passengers_table} p
+            LEFT JOIN {countries_table} c
+                ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))
+            WHERE COALESCE(c.name, p.country) IS NOT NULL
+            ORDER BY passenger_country
+        """
+        continent_query = f"""
+            SELECT DISTINCT COALESCE(c.continent, 'Unknown') AS passenger_continent
+            FROM {passengers_table} p
+            LEFT JOIN {countries_table} c
+                ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))
+            WHERE COALESCE(c.continent, 'Unknown') IS NOT NULL
+            ORDER BY passenger_continent
+        """
+    else:
+        country_query = f"""
+            SELECT DISTINCT p.country AS passenger_country
+            FROM {passengers_table} p
+            WHERE p.country IS NOT NULL
+            ORDER BY passenger_country
+        """
+        continent_query = """
+            SELECT DISTINCT 'Unknown' AS passenger_continent
+            FROM SYSIBM.SYSDUMMY1
+            ORDER BY passenger_continent
+        """
 
     bounds_df = _to_pandas_frame(
-        run_duckdb_query(
-            bounds_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=bounds_query, as_polars=pl is not None)
     )
     route_df = _to_pandas_frame(
-        run_duckdb_query(
-            route_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=route_query, as_polars=pl is not None)
     )
     class_df = _to_pandas_frame(
-        run_duckdb_query(
-            class_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=class_query, as_polars=pl is not None)
     )
     gender_df = _to_pandas_frame(
-        run_duckdb_query(
-            gender_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=gender_query, as_polars=pl is not None)
     )
     country_df = _to_pandas_frame(
-        run_duckdb_query(
-            country_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=country_query, as_polars=pl is not None)
     )
     continent_df = _to_pandas_frame(
-        run_duckdb_query(
-            continent_query,
-            env_path=env_path,
-            database_path=database_path,
-            as_polars=pl is not None,
-        )
+        run_db2_query(connector=connector, query=continent_query, as_polars=pl is not None)
     )
 
     bounds_df.columns = [column.lower() for column in bounds_df.columns]
@@ -216,6 +205,7 @@ def get_commercial_filter_options(
 
 
 def extract_commercial_base_data(
+    connector: DatabaseConnector,
     start_date: date,
     end_date: date,
     route_codes: Iterable[str] | None = None,
@@ -223,11 +213,21 @@ def extract_commercial_base_data(
     genders: Iterable[str] | None = None,
     countries: Iterable[str] | None = None,
     continents: Iterable[str] | None = None,
-    env_path: str = ".env",
     schema: str | None = None,
-    database_path: str | Path | None = None,
+    countries_available: bool = True,
 ) -> pd.DataFrame:
-    sanitize_schema(schema)
+    tickets_table = qualify_table(schema, "TICKETS")
+    flights_table = qualify_table(schema, "FLIGHTS")
+    routes_table = qualify_table(schema, "ROUTES")
+    airplanes_table = qualify_table(schema, "AIRPLANES")
+    passengers_table = qualify_table(schema, "PASSENGERS")
+    airports_table = qualify_table(schema, "AIRPORTS")
+    countries_table = qualify_table(schema, "COUNTRIES")
+
+    country_expression = "COALESCE(c.name, p.country)" if countries_available else "p.country"
+    continent_expression = (
+        "COALESCE(c.continent, 'Unknown')" if countries_available else "'Unknown'"
+    )
     where_clause, params = build_commercial_filters(
         alias="t",
         start_date=start_date,
@@ -237,14 +237,30 @@ def extract_commercial_base_data(
         genders=genders,
         countries=countries,
         continents=continents,
+        country_expression=country_expression,
+        continent_expression=continent_expression,
     )
+
+    country_join = ""
+    country_select = "p.country AS passenger_country"
+    continent_select = "'Unknown' AS passenger_continent"
+    capital_select = "NULL AS passenger_country_capital"
+    if countries_available:
+        country_join = (
+            f"LEFT JOIN {countries_table} c\n"
+            "            ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))"
+        )
+        country_select = "COALESCE(c.name, p.country) AS passenger_country"
+        continent_select = "COALESCE(c.continent, 'Unknown') AS passenger_continent"
+        capital_select = "c.capital AS passenger_country_capital"
+
     query = f"""
         WITH flight_dimension AS (
             SELECT
                 f.flight_id,
                 f.route_code,
                 MAX(f.airplane) AS airplane
-            FROM FLIGHTS f
+            FROM {flights_table} f
             GROUP BY
                 f.flight_id,
                 f.route_code
@@ -258,9 +274,9 @@ def extract_commercial_base_data(
             t.class AS ticket_class,
             p.gender,
             p.birth_date,
-            COALESCE(c.name, p.country) AS passenger_country,
-            COALESCE(c.continent, 'Unknown') AS passenger_continent,
-            c.capital AS passenger_country_capital,
+            {country_select},
+            {continent_select},
+            {capital_select},
             r.origin,
             r.destination,
             COALESCE(r.distance, 0) AS distance,
@@ -270,29 +286,27 @@ def extract_commercial_base_data(
             ao.longitude AS origin_longitude,
             ad.latitude AS destination_latitude,
             ad.longitude AS destination_longitude
-        FROM TICKETS t
-        INNER JOIN PASSENGERS p
+        FROM {tickets_table} t
+        INNER JOIN {passengers_table} p
             ON t.passenger_id = p.id
-        LEFT JOIN COUNTRIES c
-            ON UPPER(TRIM(p.country)) = UPPER(TRIM(c.name))
+        {country_join}
         INNER JOIN flight_dimension f
             ON t.flight_id = f.flight_id
             AND t.route_code = f.route_code
-        INNER JOIN ROUTES r
+        INNER JOIN {routes_table} r
             ON t.route_code = r.route_code
-        INNER JOIN AIRPLANES a
+        INNER JOIN {airplanes_table} a
             ON f.airplane = a.aircraft_registration
-        LEFT JOIN AIRPORTS ao
+        LEFT JOIN {airports_table} ao
             ON r.origin = ao.iata_code
-        LEFT JOIN AIRPORTS ad
+        LEFT JOIN {airports_table} ad
             ON r.destination = ad.iata_code
         {where_clause}
     """
-    df = run_duckdb_query(
-        query,
+    df = run_db2_query(
+        connector=connector,
+        query=query,
         params=params,
-        env_path=env_path,
-        database_path=database_path,
         as_polars=pl is not None,
     )
     return _to_pandas_frame(normalize_commercial_base_data(df))

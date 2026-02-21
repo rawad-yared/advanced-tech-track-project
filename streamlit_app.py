@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from scripts.database_connector import DatabaseConnector
 
 from dashboard.commercial_pipeline import (
     compute_commercial_views,
@@ -35,9 +36,56 @@ from dashboard.hr_pipeline import (
 st.set_page_config(page_title="IE Airlines Executive Command Center", layout="wide")
 
 
+REQUIRED_TABLES_BY_PAGE: dict[str, set[str]] = {
+    "Overview": {
+        "TICKETS",
+        "FLIGHTS",
+        "ROUTES",
+        "AIRPLANES",
+        "PASSENGERS",
+        "AIRPORTS",
+        "EMPLOYEE",
+        "DEPARTMENT",
+    },
+    "Financial Performance": {"TICKETS", "FLIGHTS", "ROUTES", "AIRPLANES"},
+    "Fleet Operations & Efficiency": {"FLIGHTS", "AIRPLANES", "ROUTES"},
+    "Commercial & Route Network": {
+        "TICKETS",
+        "PASSENGERS",
+        "FLIGHTS",
+        "ROUTES",
+        "AIRPLANES",
+        "AIRPORTS",
+    },
+    "Human Resources": {"EMPLOYEE", "DEPARTMENT", "AIRPLANES"},
+}
+
+
+@st.cache_resource
+def get_live_connector(env_path: str = ".env") -> DatabaseConnector:
+    connector = DatabaseConnector(env_path=env_path)
+    connector.test_connection()
+    return connector
+
+
+@st.cache_data(ttl=900)
+def cached_schema_capabilities(schema_name: str) -> dict[str, object]:
+    connector = get_live_connector()
+    available_tables = set(connector.get_table_names(schema=schema_name))
+    missing_required: dict[str, list[str]] = {}
+    for page, required in REQUIRED_TABLES_BY_PAGE.items():
+        missing_required[page] = sorted(required - available_tables)
+    return {
+        "available_tables": sorted(available_tables),
+        "missing_required": missing_required,
+        "countries_available": "COUNTRIES" in available_tables,
+    }
+
+
 @st.cache_data(ttl=900)
 def cached_filter_options(schema_name: str) -> dict[str, object]:
-    return get_financial_filter_options(schema=schema_name)
+    connector = get_live_connector()
+    return get_financial_filter_options(connector=connector, schema=schema_name)
 
 
 @st.cache_data(ttl=900)
@@ -48,7 +96,9 @@ def cached_financial_dataset(
     classes: tuple[str, ...],
     route_codes: tuple[str, ...],
 ) -> dict[str, object]:
+    connector = get_live_connector()
     base_df = extract_financial_base_data(
+        connector=connector,
         start_date=start_date,
         end_date=end_date,
         classes=classes,
@@ -60,7 +110,8 @@ def cached_financial_dataset(
 
 @st.cache_data(ttl=900)
 def cached_fleet_filter_options(schema_name: str) -> dict[str, object]:
-    return get_fleet_filter_options(schema=schema_name)
+    connector = get_live_connector()
+    return get_fleet_filter_options(connector=connector, schema=schema_name)
 
 
 @st.cache_data(ttl=900)
@@ -70,7 +121,9 @@ def cached_fleet_dataset(
     end_date: object,
     models: tuple[str, ...],
 ) -> dict[str, object]:
+    connector = get_live_connector()
     base_df = extract_fleet_base_data(
+        connector=connector,
         start_date=start_date,
         end_date=end_date,
         models=models,
@@ -80,8 +133,16 @@ def cached_fleet_dataset(
 
 
 @st.cache_data(ttl=900)
-def cached_commercial_filter_options(schema_name: str) -> dict[str, object]:
-    return get_commercial_filter_options(schema=schema_name)
+def cached_commercial_filter_options(
+    schema_name: str,
+    countries_available: bool,
+) -> dict[str, object]:
+    connector = get_live_connector()
+    return get_commercial_filter_options(
+        connector=connector,
+        schema=schema_name,
+        countries_available=countries_available,
+    )
 
 
 @st.cache_data(ttl=900)
@@ -94,8 +155,11 @@ def cached_commercial_dataset(
     genders: tuple[str, ...],
     countries: tuple[str, ...],
     continents: tuple[str, ...],
+    countries_available: bool,
 ) -> dict[str, object]:
+    connector = get_live_connector()
     base_df = extract_commercial_base_data(
+        connector=connector,
         start_date=start_date,
         end_date=end_date,
         route_codes=route_codes,
@@ -104,13 +168,15 @@ def cached_commercial_dataset(
         countries=countries,
         continents=continents,
         schema=schema_name,
+        countries_available=countries_available,
     )
     return {"base_df": base_df}
 
 
 @st.cache_data(ttl=900)
 def cached_hr_filter_options(schema_name: str) -> dict[str, object]:
-    return get_hr_filter_options(schema=schema_name)
+    connector = get_live_connector()
+    return get_hr_filter_options(connector=connector, schema=schema_name)
 
 
 @st.cache_data(ttl=900)
@@ -122,7 +188,9 @@ def cached_hr_dataset(
     jobs: tuple[str, ...],
     genders: tuple[str, ...],
 ) -> dict[str, object]:
+    connector = get_live_connector()
     base_df = extract_hr_base_data(
+        connector=connector,
         start_date=start_date,
         end_date=end_date,
         departments=departments,
@@ -139,16 +207,19 @@ def cached_overview_payload(
     fuel_price_per_gallon: float,
     flight_window_days: int,
     hr_window_years: int,
+    countries_available: bool,
 ) -> dict[str, object]:
     financial_options = cached_filter_options(schema_name)
     fleet_options = cached_fleet_filter_options(schema_name)
-    commercial_options = cached_commercial_filter_options(schema_name)
+    commercial_options = cached_commercial_filter_options(schema_name, countries_available)
     hr_options = cached_hr_filter_options(schema_name)
+    connector = get_live_connector()
 
     fin_min = financial_options["min_date"]  # type: ignore[index]
     fin_max = financial_options["max_date"]  # type: ignore[index]
     fin_start = max(fin_min, fin_max - timedelta(days=int(flight_window_days)))  # type: ignore[operator]
     financial_base = extract_financial_base_data(
+        connector=connector,
         start_date=fin_start,
         end_date=fin_max,
         classes=tuple(financial_options["classes"]),  # type: ignore[index]
@@ -163,6 +234,7 @@ def cached_overview_payload(
     fleet_max = fleet_options["max_date"]  # type: ignore[index]
     fleet_start = max(fleet_min, fleet_max - timedelta(days=int(flight_window_days)))  # type: ignore[operator]
     fleet_base = extract_fleet_base_data(
+        connector=connector,
         start_date=fleet_start,
         end_date=fleet_max,
         models=tuple(fleet_options["models"]),  # type: ignore[index]
@@ -181,6 +253,7 @@ def cached_overview_payload(
     comm_max = commercial_options["max_date"]  # type: ignore[index]
     comm_start = max(comm_min, comm_max - timedelta(days=int(flight_window_days)))  # type: ignore[operator]
     commercial_base = extract_commercial_base_data(
+        connector=connector,
         start_date=comm_start,
         end_date=comm_max,
         route_codes=(),
@@ -189,6 +262,7 @@ def cached_overview_payload(
         countries=(),
         continents=tuple(commercial_options["continents"]),  # type: ignore[index]
         schema=schema_name,
+        countries_available=countries_available,
     )
     commercial_views = compute_commercial_views(base_df=commercial_base)
 
@@ -196,6 +270,7 @@ def cached_overview_payload(
     hr_max = hr_options["max_date"]  # type: ignore[index]
     hr_start = max(hr_min, hr_max - timedelta(days=365 * int(hr_window_years)))  # type: ignore[operator]
     hr_base = extract_hr_base_data(
+        connector=connector,
         start_date=hr_start,
         end_date=hr_max,
         departments=tuple(hr_options["departments"]),  # type: ignore[index]
@@ -1139,6 +1214,35 @@ def main() -> None:
         st.error(f"Invalid schema value: {error}")
         st.stop()
 
+    try:
+        get_live_connector()
+    except Exception as error:
+        st.error(f"Unable to initialize live DB connection: {error}")
+        st.stop()
+
+    try:
+        capabilities = cached_schema_capabilities(schema_name)
+    except Exception as error:
+        st.error(f"Unable to inspect schema '{schema_name}': {error}")
+        st.stop()
+
+    countries_available = bool(capabilities["countries_available"])  # type: ignore[index]
+    missing_required_by_page = capabilities["missing_required"]  # type: ignore[index]
+    missing_for_pillar = missing_required_by_page.get(pillar, [])  # type: ignore[union-attr]
+    if missing_for_pillar:
+        missing_text = ", ".join(str(item) for item in missing_for_pillar)
+        st.warning(
+            f"Page '{pillar}' is unavailable in schema '{schema_name}'. Missing core tables: {missing_text}."
+        )
+        st.info("Select another page or point DB_SCHEMA to a schema with the required core tables.")
+        return
+
+    if not countries_available and pillar in ("Overview", "Commercial & Route Network"):
+        st.warning(
+            "COUNTRIES table not found. Country/continent enrichment is reduced "
+            "(continent defaults to 'Unknown')."
+        )
+
     if pillar == "Overview":
         flight_window_days = int(
             st.sidebar.slider(
@@ -1169,6 +1273,7 @@ def main() -> None:
 
         if st.sidebar.button("Refresh Data Cache"):
             st.cache_data.clear()
+            st.cache_resource.clear()
             st.rerun()
 
         try:
@@ -1177,6 +1282,7 @@ def main() -> None:
                 fuel_price_per_gallon=float(fuel_price),
                 flight_window_days=flight_window_days,
                 hr_window_years=hr_window_years,
+                countries_available=countries_available,
             )
         except Exception as error:
             st.error(f"Unable to load overview data: {error}")
@@ -1240,6 +1346,7 @@ def main() -> None:
 
         if st.sidebar.button("Refresh Data Cache"):
             st.cache_data.clear()
+            st.cache_resource.clear()
             st.rerun()
 
         try:
@@ -1344,6 +1451,7 @@ def main() -> None:
 
         if st.sidebar.button("Refresh Data Cache"):
             st.cache_data.clear()
+            st.cache_resource.clear()
             st.rerun()
 
         try:
@@ -1374,7 +1482,10 @@ def main() -> None:
 
     if pillar == "Commercial & Route Network":
         try:
-            commercial_options = cached_commercial_filter_options(schema_name)
+            commercial_options = cached_commercial_filter_options(
+                schema_name=schema_name,
+                countries_available=countries_available,
+            )
         except Exception as error:
             st.error(f"Unable to load commercial filter options: {error}")
             st.stop()
@@ -1432,6 +1543,7 @@ def main() -> None:
 
         if st.sidebar.button("Refresh Data Cache"):
             st.cache_data.clear()
+            st.cache_resource.clear()
             st.rerun()
 
         try:
@@ -1444,6 +1556,7 @@ def main() -> None:
                 genders=tuple(selected_genders),
                 countries=tuple(selected_countries),
                 continents=tuple(selected_continents),
+                countries_available=countries_available,
             )
         except Exception as error:
             st.error(f"Unable to load commercial data: {error}")
@@ -1503,6 +1616,7 @@ def main() -> None:
 
     if st.sidebar.button("Refresh Data Cache"):
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
     try:
